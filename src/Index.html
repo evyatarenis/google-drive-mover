@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5d6576; --line: #e3e6eb;
+      --accent: #1a73e8; --accent-text: #ffffff; --danger: #c5221f; --ok: #188038; --warn-bg: #fef7e0; --warn-line: #f3d77a;
+      --code-bg: #f1f3f4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #15171c; --card: #1f2229; --text: #e8eaed; --muted: #a0a6b1; --line: #343842;
+        --accent: #8ab4f8; --accent-text: #15171c; --danger: #f28b82; --ok: #81c995; --warn-bg: #3a3320; --warn-line: #6b5a24;
+        --code-bg: #2a2d34;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 16px; }
+    h1 { font-size: 22px; margin: 0; }
+    h2 { font-size: 16px; margin: 0 0 4px; }
+    .account { font-size: 13px; color: var(--muted); }
+    .account b { color: var(--text); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 14px; }
+    .hint { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+    .disclaimer { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 12px; padding: 12px 16px; font-size: 13px; margin-bottom: 14px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+    input[type=text] { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+                       background: var(--bg); color: var(--text); font: inherit; }
+    .check { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin-top: 12px; }
+    .check input { margin-top: 4px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    button { font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 8px; cursor: pointer;
+             border: 1px solid var(--line); background: var(--card); color: var(--text); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+    button.danger { color: var(--danger); border-color: var(--danger); }
+    button:disabled { opacity: .5; cursor: default; }
+    .folder { font-size: 13px; color: var(--muted); margin-top: 6px; min-height: 1.2em; }
+    .status { font-size: 13px; margin-top: 12px; color: var(--muted); }
+    .status b.done { color: var(--ok); }
+    .status b.busy { color: var(--accent); }
+    .step { display: inline-block; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+    pre { background: var(--code-bg); border-radius: 8px; padding: 12px; white-space: pre-wrap; word-break: break-word;
+          font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0; max-height: 420px; overflow: auto; }
+    .error { color: var(--danger); font-size: 13px; margin-top: 8px; }
+    dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text); max-width: 440px; width: calc(100% - 32px); }
+    dialog::backdrop { background: rgba(0,0,0,.4); }
+    footer { font-size: 12px; color: var(--muted); text-align: center; margin-top: 20px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Google Drive Mover</h1>
+    <div class="account">Signed in as <b id="account">…</b></div>
+  </header>
+
+  <div class="disclaimer">
+    <b>Use at your own risk.</b> This tool comes with no warranty. The author is not responsible for any damage
+    or data loss it may or may not cause. Always check your copies before deleting anything.
+  </div>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <p class="hint">Use the same settings in both accounts.</p>
+    <label for="src">Source folder (link or ID)</label>
+    <input type="text" id="src" placeholder="https://drive.google.com/drive/folders/…">
+    <div class="folder" id="srcInfo"></div>
+    <label for="dest">Name of the copy folder in the receiving account</label>
+    <input type="text" id="dest">
+    <label class="check"><input type="checkbox" id="follow">
+      <span>Follow shortcuts: copy what a shortcut points to, not just the link</span></label>
+    <div class="row"><button class="primary" id="saveBtn" onclick="save()">Save settings</button></div>
+    <div class="error" id="saveErr"></div>
+  </section>
+
+  <section class="card">
+    <span class="step">In the account that receives the files</span>
+    <h2>Copy</h2>
+    <p class="hint">Preview first. Copying continues on its own in the background; you can close this page.</p>
+    <div class="row">
+      <button onclick="run('preview')">Preview</button>
+      <button class="primary" onclick="run('copy')">Copy</button>
+      <button onclick="run('verify')">Verify</button>
+      <button onclick="run('stop')">Stop</button>
+    </div>
+    <div class="status" id="copyStatus"></div>
+  </section>
+
+  <section class="card">
+    <span class="step">In the account you're freeing up</span>
+    <h2>Delete originals</h2>
+    <p class="hint">Only after Verify looks right. Moves only files this account owns to the Bin. Empty the Bin yourself afterwards.</p>
+    <div class="row">
+      <button onclick="run('delete', false)">Preview delete</button>
+      <button class="danger" onclick="askDelete()">Move originals to Bin…</button>
+    </div>
+    <div class="status" id="deleteStatus"></div>
+  </section>
+
+  <section class="card" id="outCard" hidden>
+    <h2 id="outTitle">Result</h2>
+    <pre id="out"></pre>
+  </section>
+
+  <footer>Provided "as is" under the MIT license, without warranty of any kind.</footer>
+</main>
+
+<dialog id="confirmDlg">
+  <h2>Move originals to the Bin?</h2>
+  <p class="hint">Every file <b id="dlgAccount"></b> owns inside the source folder will be moved to the Bin.
+     Make sure Verify showed nothing important missing. Type <b>DELETE</b> to confirm.</p>
+  <input type="text" id="confirmText" autocomplete="off">
+  <div class="row">
+    <button onclick="document.getElementById('confirmDlg').close()">Cancel</button>
+    <button class="danger" id="confirmBtn" disabled onclick="confirmDelete()">Move to Bin</button>
+  </div>
+</dialog>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let busy = false, pollTimer = null;
+  const titles = { preview: 'Preview', copy: 'Copy', verify: 'Verify', stop: 'Stop', delete: 'Delete originals' };
+
+  function call(fn, ...args) {
+    return new Promise((resolve, reject) =>
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args));
+  }
+
+  function when(iso) { return iso ? new Date(iso).toLocaleString() : ''; }
+
+  function render(s) {
+    $('account').textContent = s.account;
+    $('dlgAccount').textContent = s.account;
+    if (document.activeElement !== $('src')) $('src').value = s.settings.sourceFolderId;
+    if (document.activeElement !== $('dest')) $('dest').value = s.settings.destFolderName;
+    $('follow').checked = s.settings.followShortcuts;
+    $('srcInfo').textContent = s.sourceFolderName
+      ? 'Folder "' + s.sourceFolderName + '", owned by ' + s.sourceFolderOwner
+      : (s.settings.sourceFolderId ? 'This account can\'t open the folder.' : 'Not set yet.');
+
+    const c = s.copy;
+    const label = { idle: 'Not started', copying: 'Copying…', done: 'Finished', stopped: 'Stopped' }[c.status] || c.status;
+    const cls = c.status === 'done' ? 'done' : c.status === 'copying' ? 'busy' : '';
+    $('copyStatus').innerHTML = 'Status: <b class="' + cls + '">' + label + '</b>' +
+      (c.total ? ' · ' + c.total + ' files copied' : '') +
+      (c.errors ? ' · ' + c.errors + ' could not be copied' : '') +
+      (c.lastRun ? ' · last run ' + when(c.lastRun) : '');
+
+    const d = s.del;
+    const dl = { idle: '', deleting: 'Moving to Bin…', done: 'Done. Now empty the Bin in Drive.', stopped: 'Stopped' }[d.status];
+    $('deleteStatus').innerHTML = dl ? 'Status: <b class="' + (d.status === 'done' ? 'done' : 'busy') + '">' + dl + '</b>' +
+      (d.lastRun ? ' · last run ' + when(d.lastRun) : '') : '';
+
+    clearTimeout(pollTimer);
+    if (c.status === 'copying' || d.status === 'deleting') pollTimer = setTimeout(refresh, 20000);
+  }
+
+  function refresh() { return call('getState').then(render).catch(showError); }
+
+  function setBusy(b) {
+    busy = b;
+    document.querySelectorAll('button').forEach(x => { if (x.id !== 'confirmBtn') x.disabled = b; });
+  }
+
+  function save() {
+    $('saveErr').textContent = '';
+    setBusy(true);
+    call('saveSettings', { sourceFolderId: $('src').value, destFolderName: $('dest').value, followShortcuts: $('follow').checked })
+      .then(s => { render(s); $('saveErr').textContent = ''; })
+      .catch(e => { $('saveErr').textContent = e.message || e; })
+      .finally(() => setBusy(false));
+  }
+
+  function run(action, confirmed) {
+    if (busy) return;
+    setBusy(true);
+    $('outCard').hidden = false;
+    $('outTitle').textContent = titles[action];
+    $('out').textContent = action === 'copy'
+      ? 'Copying… a run takes up to 5 minutes. You can close the page; it continues in the background.'
+      : 'Working… large folders can take a few minutes.';
+    if (action === 'copy') refresh();
+    call('runFromPage', action, confirmed)
+      .then(text => { $('out').textContent = text; })
+      .catch(e => { $('out').textContent = 'Error: ' + (e.message || e); })
+      .finally(() => { setBusy(false); refresh(); });
+  }
+
+  function askDelete() {
+    $('confirmText').value = '';
+    $('confirmBtn').disabled = true;
+    $('confirmDlg').showModal();
+  }
+  $('confirmText').addEventListener('input', e => { $('confirmBtn').disabled = e.target.value.trim() !== 'DELETE'; });
+  function confirmDelete() { $('confirmDlg').close(); run('delete', true); }
+
+  function showError(e) { $('outCard').hidden = false; $('outTitle').textContent = 'Error'; $('out').textContent = e.message || e; }
+
+  refresh();
+</script>
+</body>
+</html>

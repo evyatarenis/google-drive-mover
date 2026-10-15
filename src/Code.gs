@@ -5,6 +5,14 @@
  * another account's Drive, so the files use the other account's storage.
  * See README.md for the full step-by-step guide.
  *
+ * DISCLAIMER: This script is provided "as is", without warranty of any kind.
+ * You use it at your own risk. The author is not responsible for any damage
+ * or data loss it may or may not cause. Check your copies before deleting
+ * anything. See LICENSE.
+ *
+ * Use it from the web page (Deploy > Test deployments > Web app), or run the
+ * functions from the editor:
+ *
  * In the DESTINATION account (the one that receives the files):
  *   previewCopy()     - dry run: lists what would be copied. Changes nothing.
  *   startCopy()       - copies the folder. Continues by itself every few
@@ -20,6 +28,7 @@
  */
 
 // ===== Settings =============================================================
+// When you use the web page, the values saved there take priority over these.
 
 // ID of the folder shared from the source account. It is the part of the
 // folder's address after /folders/
@@ -32,8 +41,9 @@ const DEST_FOLDER_NAME = 'Copied from old account';
 // false: copy only the shortcut itself (a link).
 const FOLLOW_SHORTCUTS = true;
 
-// Used by deleteOriginals() only. Leave false for a dry run that lists what
-// would be moved to the Bin. Set to true only after verifyCopy looks right.
+// Used by deleteOriginals() from the editor. Leave false for a dry run that
+// lists what would be moved to the Bin. Set to true only after verifyCopy
+// looks right. (The web page asks for confirmation instead.)
 const CONFIRM_DELETE = false;
 
 // ============================================================================
@@ -47,45 +57,127 @@ const UNSUPPORTED_MIMES = {
   'application/vnd.google-apps.site': 'Google Site',
 };
 
+let cfg;                 // effective settings, see loadSettings_()
+let confirmDelete = false;
 let startTime;
 let copiedThisRun = 0;
 let errors = [];
 
+// ---------- Web page --------------------------------------------------------
+
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('Index')
+    .setTitle('Google Drive Mover')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** Everything the page needs to draw itself. */
+function getState() {
+  const s = loadSettings_();
+  const p = props_().getProperties();
+  return {
+    account: Session.getActiveUser().getEmail(),
+    settings: { sourceFolderId: s.sourceFolderId === 'PASTE_FOLDER_ID_HERE' ? '' : s.sourceFolderId,
+                destFolderName: s.destFolderName, followShortcuts: s.followShortcuts },
+    sourceFolderName: folderName_(s.sourceFolderId),
+    sourceFolderOwner: folderOwner_(s.sourceFolderId),
+    copy: { status: p.copyStatus || 'idle', total: Number(p.copyTotal || 0),
+            lastRun: p.copyLastRun || '', errors: Number(p.copyErrors || 0) },
+    del: { status: p.deleteStatus || 'idle', lastRun: p.deleteLastRun || '' },
+  };
+}
+
+function saveSettings(s) {
+  const id = extractId_(s.sourceFolderId || '');
+  if (!id) throw new Error('Paste the folder link or its ID.');
+  try { DriveApp.getFolderById(id); } catch (e) {
+    throw new Error('This account can\'t open that folder. Is it shared with ' +
+      Session.getActiveUser().getEmail() + '?');
+  }
+  const name = String(s.destFolderName || '').trim() || DEST_FOLDER_NAME;
+  const old = props_().getProperties();
+  if (old.sourceFolderId !== id || old.destFolderName !== name) {
+    // A different copy job: start the progress counters from zero.
+    ['copyStatus', 'copyTotal', 'copyErrors', 'copyLastRun', 'deleteStatus', 'deleteLastRun']
+      .forEach(k => props_().deleteProperty(k));
+  }
+  props_().setProperties({
+    sourceFolderId: id, destFolderName: name, followShortcuts: s.followShortcuts ? '1' : '0',
+  });
+  return getState();
+}
+
+/** Called by the page. Returns the report text. */
+function runFromPage(action, confirmed) {
+  switch (action) {
+    case 'preview': return previewCopy();
+    case 'copy':    return startCopy();
+    case 'verify':  return verifyCopy();
+    case 'stop':    stopCopy(); return 'Stopped. Run Copy again to continue where it left off.';
+    case 'delete':  return deleteOriginals(confirmed === true);
+  }
+  throw new Error('Unknown action: ' + action);
+}
+
 // ---------- Copy ------------------------------------------------------------
 
 function startCopy() {
+  loadSettings_();
   checkSettings_();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return 'A copy run is already in progress. Wait a few minutes and check again.';
+  try { return startCopyLocked_(); } finally { lock.releaseLock(); }
+}
+
+function startCopyLocked_() {
   startTime = Date.now();
   copiedThisRun = 0;
   errors = [];
   deleteTriggers_('startCopy');
+  setProps_({ copyStatus: 'copying', copyLastRun: new Date().toISOString() });
 
-  const source = DriveApp.getFolderById(SOURCE_FOLDER_ID);
-  const dest = getOrCreateChildFolder_(DriveApp.getRootFolder(), DEST_FOLDER_NAME);
+  const source = DriveApp.getFolderById(cfg.sourceFolderId);
+  const dest = getOrCreateChildFolder_(DriveApp.getRootFolder(), cfg.destFolderName);
 
   const finished = copyFolder_(source, dest, new Set());
 
-  Logger.log('Copied this run: ' + copiedThisRun);
-  if (errors.length) Logger.log('Could not copy:\n' + errors.join('\n'));
+  const p = props_();
+  setProps_({
+    copyTotal: String(Number(p.getProperty('copyTotal') || 0) + copiedThisRun),
+    copyErrors: String(errors.length),
+  });
+
+  const lines = ['Copied this run: ' + copiedThisRun];
+  if (errors.length) lines.push('', 'Could not copy:', ...errors);
 
   if (finished) {
+    setProps_({ copyStatus: 'done' });
     MailApp.sendEmail(
       Session.getActiveUser().getEmail(),
       'Drive copy finished',
-      'All files were copied into "' + DEST_FOLDER_NAME + '".\n\n' +
+      'All files were copied into "' + cfg.destFolderName + '".\n\n' +
       (errors.length ? 'These could not be copied:\n' + errors.join('\n') : 'No errors.') +
-      '\n\nNext step: run verifyCopy to check that nothing is missing.'
+      '\n\nNext step: run verifyCopy to check that nothing is missing.' +
+      '\n\nThis script comes with no warranty; you use it at your own risk.'
     );
-    Logger.log('All done.');
+    lines.push('', 'All done. Next step: Verify.');
   } else {
     ScriptApp.newTrigger('startCopy').timeBased().after(60 * 1000).create();
-    Logger.log('Time limit reached - continuing automatically in about 1 minute.');
+    lines.push('', 'Time limit reached - continuing automatically in about 1 minute.',
+               'You can close this page. You will get an email when it is finished.');
   }
+  const report = lines.join('\n');
+  Logger.log(report);
+  return report;
 }
 
 function stopCopy() {
   deleteTriggers_('startCopy');
   deleteTriggers_('deleteOriginals');
+  const p = props_();
+  if (p.getProperty('copyStatus') === 'copying') p.setProperty('copyStatus', 'stopped');
+  if (p.getProperty('deleteStatus') === 'deleting') p.setProperty('deleteStatus', 'stopped');
+  p.deleteProperty('deleteConfirmed');
   Logger.log('Automatic continuation cancelled.');
 }
 
@@ -112,7 +204,7 @@ function copyFolder_(source, dest, visited) {
     const name = file.getName();
 
     let toCopy = file;
-    if (FOLLOW_SHORTCUTS && file.getMimeType() === SHORTCUT_MIME) {
+    if (cfg.followShortcuts && file.getMimeType() === SHORTCUT_MIME) {
       const t = resolveShortcut_(file);
       if (!t) { errors.push(name + ' (shortcut target not accessible)'); continue; }
       if (t.folder) { shortcutFolders.push({ name: name, folder: t.folder }); continue; }
@@ -148,8 +240,9 @@ function copyFolder_(source, dest, visited) {
 
 /** Dry run: what startCopy would do. Changes nothing. */
 function previewCopy() {
+  loadSettings_();
   checkSettings_();
-  const source = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  const source = DriveApp.getFolderById(cfg.sourceFolderId);
   const dest = findDestFolder_();  // null if nothing was copied yet
   const r = newReport_();
   compare_(source, dest, '', r, new Set());
@@ -169,13 +262,15 @@ function previewCopy() {
 
   Logger.log(report);
   MailApp.sendEmail(Session.getActiveUser().getEmail(), 'Drive copy preview', report);
+  return report;
 }
 
 function verifyCopy() {
+  loadSettings_();
   checkSettings_();
-  const source = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  const source = DriveApp.getFolderById(cfg.sourceFolderId);
   const dest = findDestFolder_();
-  if (!dest) throw new Error('Destination folder not found: ' + DEST_FOLDER_NAME);
+  if (!dest) throw new Error('Destination folder not found: ' + cfg.destFolderName);
 
   const r = newReport_();
   compare_(source, dest, '', r, new Set());
@@ -195,6 +290,7 @@ function verifyCopy() {
 
   Logger.log(report);
   MailApp.sendEmail(Session.getActiveUser().getEmail(), 'Drive copy check', report);
+  return report;
 }
 
 function newReport_() {
@@ -227,7 +323,7 @@ function compare_(src, dst, path, r, visited) {
 
     if (f.getMimeType() === SHORTCUT_MIME) {
       r.shortcuts.push(path + name + '  ->  ' + describeTarget_(f));
-      if (FOLLOW_SHORTCUTS) {
+      if (cfg.followShortcuts) {
         const t = resolveShortcut_(f);
         if (!t) continue;
         if (t.folder) { shortcutFolders.push({ name: name, folder: t.folder }); continue; }
@@ -268,9 +364,9 @@ function compare_(src, dst, path, r, visited) {
 }
 
 function shortcutSection_(r) {
-  const how = FOLLOW_SHORTCUTS
-    ? 'their contents ARE copied (FOLLOW_SHORTCUTS = true)'
-    : 'only the link is copied, NOT the contents (FOLLOW_SHORTCUTS = false)';
+  const how = cfg.followShortcuts
+    ? 'their contents ARE copied (follow shortcuts is on)'
+    : 'only the link is copied, NOT the contents (follow shortcuts is off)';
   return ['Shortcuts (' + r.shortcuts.length + ') - ' + how + ':', ...r.shortcuts];
 }
 
@@ -282,27 +378,42 @@ function unsupportedSection_(r) {
 // ---------- Delete originals (run in the SOURCE account) --------------------
 
 /**
- * Moves the files and folders THIS account owns inside SOURCE_FOLDER_ID to
+ * Moves the files and folders THIS account owns inside the source folder to
  * the Bin. Files owned by anyone else are left alone. Shortcuts are not
  * followed. Nothing is deleted permanently: empty the Bin yourself afterwards.
+ *
+ * @param {boolean=} confirmed  true from the web page after the user confirmed.
+ *     When run from the editor this is not set and CONFIRM_DELETE decides.
  */
-function deleteOriginals() {
+function deleteOriginals(confirmed) {
+  loadSettings_();
   checkSettings_();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return 'Another run is already in progress. Wait a few minutes and check again.';
+  try { return deleteOriginalsLocked_(confirmed); } finally { lock.releaseLock(); }
+}
+
+function deleteOriginalsLocked_(confirmed) {
+  const p = props_();
+  const continuing = typeof confirmed === 'object' && confirmed !== null;  // trigger event
+  confirmDelete = CONFIRM_DELETE || confirmed === true ||
+                  (continuing && p.getProperty('deleteConfirmed') === '1');
   startTime = Date.now();
   deleteTriggers_('deleteOriginals');
 
   const me = Session.getActiveUser().getEmail();
-  const root = DriveApp.getFolderById(SOURCE_FOLDER_ID);
-  if (root.getName() === DEST_FOLDER_NAME) {
-    throw new Error('SOURCE_FOLDER_ID points to the copy folder. Use the original folder.');
+  const root = DriveApp.getFolderById(cfg.sourceFolderId);
+  if (root.getName() === cfg.destFolderName) {
+    throw new Error('The source folder setting points to the copy folder. Use the original folder.');
   }
+  if (confirmDelete) setProps_({ deleteStatus: 'deleting', deleteLastRun: new Date().toISOString() });
 
   const r = { files: 0, bytes: 0, folders: 0, notOwned: 0, errors: [] };
   const finished = trashOwned_(root, me, r);
 
-  const verb = CONFIRM_DELETE ? 'Moved to Bin' : 'Would move to Bin';
+  const verb = confirmDelete ? 'Moved to Bin' : 'Would move to Bin';
   const lines = [
-    CONFIRM_DELETE ? 'Account: ' + me : 'DRY RUN - nothing was changed. Account: ' + me,
+    confirmDelete ? 'Account: ' + me : 'DRY RUN - nothing was changed. Account: ' + me,
     '',
     verb + ': ' + r.files + ' files (' + gb_(r.bytes) + '), ' + r.folders + ' empty folders',
     'Left alone (owned by someone else): ' + r.notOwned,
@@ -310,16 +421,21 @@ function deleteOriginals() {
   if (r.errors.length) lines.push('', 'Errors (' + r.errors.length + '):', ...r.errors);
 
   if (!finished) {
-    if (CONFIRM_DELETE) {
+    if (confirmDelete) {
+      p.setProperty('deleteConfirmed', '1');
       ScriptApp.newTrigger('deleteOriginals').timeBased().after(60 * 1000).create();
-      Logger.log(lines.join('\n') + '\n\nTime limit reached - continuing automatically in about 1 minute.');
+      lines.push('', 'Time limit reached - continuing automatically in about 1 minute.');
     } else {
-      Logger.log(lines.join('\n') + '\n\nTime limit reached - the dry run covers only part of the folder.');
+      lines.push('', 'Time limit reached - the dry run covers only part of the folder.');
     }
-    return;
+    const partial = lines.join('\n');
+    Logger.log(partial);
+    return partial;
   }
 
-  if (CONFIRM_DELETE) {
+  p.deleteProperty('deleteConfirmed');
+  if (confirmDelete) {
+    setProps_({ deleteStatus: 'done' });
     const elsewhere = countOwnedFiles_(1000);
     lines.push('',
       'Files this account still owns elsewhere in Drive: ' + elsewhere.count +
@@ -327,12 +443,14 @@ function deleteOriginals() {
       '',
       'Last step: open Drive > Bin > Empty bin. Space is freed only after that (permanent).');
   } else {
-    lines.push('', 'To do it for real: set CONFIRM_DELETE = true, save, and run deleteOriginals again.');
+    lines.push('', 'To do it for real, confirm the delete (on the web page) or set ' +
+               'CONFIRM_DELETE = true, save, and run deleteOriginals again.');
   }
 
   const report = lines.join('\n');
   Logger.log(report);
-  MailApp.sendEmail(me, CONFIRM_DELETE ? 'Drive originals moved to Bin' : 'Drive delete preview', report);
+  MailApp.sendEmail(me, confirmDelete ? 'Drive originals moved to Bin' : 'Drive delete preview', report);
+  return report;
 }
 
 /** Returns true when done, false if it ran out of time. */
@@ -345,7 +463,7 @@ function trashOwned_(folder, me, r) {
     if (ownerOf_(f) !== me) { r.notOwned++; continue; }
     r.files++;
     r.bytes += f.getSize();
-    if (CONFIRM_DELETE) {
+    if (confirmDelete) {
       try { f.setTrashed(true); } catch (e) { r.errors.push(f.getName() + ' (' + e.message + ')'); }
     }
   }
@@ -360,9 +478,9 @@ function trashOwned_(folder, me, r) {
   // Bin the folder itself once it is empty (or would be, in a dry run).
   if (ownerOf_(folder) === me) {
     const empty = !hasLiveItem_(folder.getFiles()) && !hasLiveItem_(folder.getFolders());
-    if (!CONFIRM_DELETE || empty) {
+    if (!confirmDelete || empty) {
       r.folders++;
-      if (CONFIRM_DELETE) {
+      if (confirmDelete) {
         try { folder.setTrashed(true); } catch (e) { r.errors.push(folder.getName() + '/ (' + e.message + ')'); }
       }
     }
@@ -386,14 +504,49 @@ function countOwnedFiles_(limit) {
 
 // ---------- Helpers ---------------------------------------------------------
 
+function props_() {
+  return PropertiesService.getScriptProperties();
+}
+
+function setProps_(o) {
+  props_().setProperties(o);
+}
+
+/** Settings saved from the web page win over the constants at the top. */
+function loadSettings_() {
+  const p = props_().getProperties();
+  cfg = {
+    sourceFolderId: p.sourceFolderId || SOURCE_FOLDER_ID,
+    destFolderName: p.destFolderName || DEST_FOLDER_NAME,
+    followShortcuts: p.followShortcuts !== undefined ? p.followShortcuts === '1' : FOLLOW_SHORTCUTS,
+  };
+  return cfg;
+}
+
 function checkSettings_() {
-  if (!SOURCE_FOLDER_ID || SOURCE_FOLDER_ID === 'PASTE_FOLDER_ID_HERE') {
-    throw new Error('Set SOURCE_FOLDER_ID at the top of the script first.');
+  if (!cfg.sourceFolderId || cfg.sourceFolderId === 'PASTE_FOLDER_ID_HERE') {
+    throw new Error('Set the source folder first (on the web page, or SOURCE_FOLDER_ID at the top of the script).');
   }
 }
 
+/** Accepts a folder link or a bare ID. */
+function extractId_(text) {
+  const s = String(text).trim();
+  const m = s.match(/\/folders\/([\w-]+)/) || s.match(/[?&]id=([\w-]+)/);
+  if (m) return m[1];
+  return /^[\w-]{10,}$/.test(s) ? s : '';
+}
+
+function folderName_(id) {
+  try { return DriveApp.getFolderById(id).getName(); } catch (e) { return ''; }
+}
+
+function folderOwner_(id) {
+  try { return ownerOf_(DriveApp.getFolderById(id)); } catch (e) { return ''; }
+}
+
 function findDestFolder_() {
-  const it = DriveApp.getRootFolder().getFoldersByName(DEST_FOLDER_NAME);
+  const it = DriveApp.getRootFolder().getFoldersByName(cfg.destFolderName);
   return it.hasNext() ? it.next() : null;
 }
 
